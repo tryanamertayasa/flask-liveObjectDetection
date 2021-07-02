@@ -1,24 +1,14 @@
-import io
 from flask import Flask
-from PIL import Image
 from flask import Flask, render_template, Response
 import sys
 sys.path.insert(0, './yolov5')
-
 from yolov5.utils.google_utils import attempt_download
 from yolov5.models.experimental import attempt_load
 from yolov5.utils.datasets import LoadImages, LoadStreams
-from yolov5.utils.general import check_img_size, non_max_suppression, scale_coords, \
-    check_imshow
+from yolov5.utils.general import check_img_size, non_max_suppression, scale_coords
 from yolov5.utils.torch_utils import select_device, time_synchronized
 from deep_sort_pytorch.utils.parser import get_config
 from deep_sort_pytorch.deep_sort import DeepSort
-import argparse
-import os
-import platform
-import shutil
-import time
-from pathlib import Path
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
@@ -83,9 +73,9 @@ def draw_boxes(img, bbox, identities=None, offset=(0, 0)):
 
 
 def gen_frames():
-    out, source, yolo_weights, deep_sort_weights, show_vid, save_vid, save_txt, imgsz, evaluate = \
-        'inference/output', '0', "yolov5/weights/yolov5s.pt", "deep_sort_pytorch/deep_sort/deep/checkpoint/ckpt.t7", True, False, \
-            False, 640, False
+    source = 'http://45.118.114.26:80/camera/Jamika.m3u8'
+    yolo_weights = 'yolov5/weights/yolov5s.pt'
+    imgsz = 640
     webcam = source == '0' or source.startswith(
         'rtsp') or source.startswith('http') or source.endswith('.txt')
 
@@ -103,13 +93,6 @@ def gen_frames():
     # Initialize
     device = select_device('')
 
-    # The MOT16 evaluation runs multiple inference streams in parallel, each one writing to
-    # its own .txt file. Hence, in that case, the output folder is not restored
-    if not evaluate:
-        if os.path.exists(out):
-            pass
-            shutil.rmtree(out)  # delete output folder
-        os.makedirs(out)  # make new output folder
     half = device.type != 'cpu'  # half precision only supported on CUDA
 
     # Load model
@@ -120,17 +103,8 @@ def gen_frames():
     if half:
         model.half()  # to FP16
 
-    # Set Dataloader
-    vid_path, vid_writer = None, None
-    # Check if environment supports image displays
-    if show_vid:
-        show_vid = check_imshow()
-
-    if webcam:
-        cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride)
-    else:
-        dataset = LoadImages(source, img_size=imgsz)
+    cudnn.benchmark = True  # set True to speed up constant image size inference
+    dataset = LoadStreams(source, img_size=imgsz, stride=stride)
 
     # Get names and colors
     names = model.module.names if hasattr(model, 'module') else model.names
@@ -138,12 +112,6 @@ def gen_frames():
     # Run inference
     if device.type != 'cpu':
         model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-    t0 = time.time()
-
-    save_path = str(Path(out))
-    # extract what is in between the last '/' and last '.'
-    txt_file_name = source.split('/')[-1].split('.')[0]
-    txt_path = str(Path(out)) + '/' + txt_file_name + '.txt'
 
     for frame_idx, (path, img, im0s, vid_cap) in enumerate(dataset):
         print(dataset)
@@ -159,7 +127,7 @@ def gen_frames():
 
         # Apply NMS
         pred = non_max_suppression(
-            pred, 0.4, 0.5, classes=[0], agnostic=False)
+            pred, 0.4, 0.5, classes=[2], agnostic=False)
         t2 = time_synchronized()
 
         # Process detections
@@ -170,7 +138,6 @@ def gen_frames():
                 p, s, im0 = path, '', im0s
 
             s += '%gx%g ' % img.shape[2:]  # print string
-            save_path = str(Path(out) / Path(p).name)
 
             if det is not None and len(det):
                 # Rescale boxes from img_size to im0 size
@@ -204,28 +171,15 @@ def gen_frames():
                     bbox_xyxy = outputs[:, :4]
                     identities = outputs[:, -1]
                     draw_boxes(im0, bbox_xyxy, identities)
-                    # to MOT format
-                    tlwh_bboxs = xyxy_to_tlwh(bbox_xyxy)
-
-                    # Write MOT compliant results to file
-                    if save_txt:
-                        for j, (tlwh_bbox, output) in enumerate(zip(tlwh_bboxs, outputs)):
-                            bbox_top = tlwh_bbox[0]
-                            bbox_left = tlwh_bbox[1]
-                            bbox_w = tlwh_bbox[2]
-                            bbox_h = tlwh_bbox[3]
-                            identity = output[-1]
-                            with open(txt_path, 'a') as f:
-                                f.write(('%g ' * 10 + '\n') % (frame_idx, identity, bbox_top,
-                                                            bbox_left, bbox_w, bbox_h, -1, -1, -1, -1))  # label format
 
             else:
                 deepsort.increment_ages()
 
             # Print time (inference + NMS)
             print('%sDone. (%.3fs)' % (s, t2 - t1))
-            print(im0.size())
-            frame = im0.tobytes()
+
+            success, buffer = cv2.imencode('.jpg', im0)
+            frame = buffer.tobytes()
             # Stream results
             yield (b'--frame\r\n'
                     b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
@@ -246,30 +200,3 @@ def index():
 if __name__ == '__main__':
     with torch.no_grad():
         app.run(debug=True)
-
-# if __name__ == '__main__':
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--yolo_weights', type=str, default='yolov5/weights/yolov5s.pt', help='model.pt path')
-#     parser.add_argument('--deep_sort_weights', type=str, default='deep_sort_pytorch/deep_sort/deep/checkpoint/ckpt.t7', help='ckpt.t7 path')
-#     # file/folder, 0 for webcam
-#     parser.add_argument('--source', type=str, default='0', help='source')
-#     parser.add_argument('--output', type=str, default='inference/output', help='output folder')  # output folder
-#     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
-#     parser.add_argument('--conf-thres', type=float, default=0.4, help='object confidence threshold')
-#     parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
-#     parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
-#     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-#     parser.add_argument('--show-vid', action='store_true', help='display tracking video results')
-#     parser.add_argument('--save-vid', action='store_true', help='save video tracking results')
-#     parser.add_argument('--save-txt', action='store_true', help='save MOT compliant results to *.txt')
-#     # class 0 is person, 1 is bycicle, 2 is car... 79 is oven
-#     parser.add_argument('--classes', nargs='+', default=[2], type=int, help='filter by class')
-#     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
-#     parser.add_argument('--augment', action='store_true', help='augmented inference')
-#     parser.add_argument('--evaluate', action='store_true', help='augmented inference')
-#     parser.add_argument("--config_deepsort", type=str, default="deep_sort_pytorch/configs/deep_sort.yaml")
-#     args = parser.parse_args()
-#     args.img_size = check_img_size(args.img_size)
-
-#     with torch.no_grad():
-#         detect(args)
